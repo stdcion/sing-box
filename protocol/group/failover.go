@@ -140,8 +140,6 @@ func (s *Failover) DialContext(ctx context.Context, network string, destination 
 	}
 	s.logger.ErrorContext(ctx, err)
 	s.group.history.DeleteURLTestHistory(RealTag(outbound))
-	s.group.markUnavailable(outbound)
-	s.group.performUpdateCheck(outbound.Tag() + " connection failed")
 	return nil, err
 }
 
@@ -160,8 +158,6 @@ func (s *Failover) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	}
 	s.logger.ErrorContext(ctx, err)
 	s.group.history.DeleteURLTestHistory(RealTag(outbound))
-	s.group.markUnavailable(outbound)
-	s.group.performUpdateCheck(outbound.Tag() + " connection failed")
 	return nil, err
 }
 
