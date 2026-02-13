@@ -14,7 +14,7 @@ on:
         description: "The tag version you want to build"
 
 env:
-  REGISTRY_IMAGE: ghcr.io/sagernet/sing-box
+  REGISTRY_IMAGE: ghcr.io/stdcion/sing-box
 
 jobs:
   build_binary:

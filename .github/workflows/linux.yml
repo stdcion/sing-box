@@ -233,7 +233,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Publish packages
+      - name: Upload release artifacts
         if: github.event_name != 'push'
-        run: |-
-          ls dist | xargs -I {} curl -F "package=@dist/{}" https://${{ secrets.FURY_TOKEN }}@push.fury.io/sagernet/
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist

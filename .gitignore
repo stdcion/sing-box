@@ -13,6 +13,7 @@
 /*.aar
 /*.xcframework/
 .DS_Store
+/gpg/
 /config.d/
 /venv/
 CLAUDE.md
