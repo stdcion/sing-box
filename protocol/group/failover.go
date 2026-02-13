@@ -43,6 +43,7 @@ type Failover struct {
 	interval                     time.Duration
 	idleTimeout                  time.Duration
 	recoveryThreshold            int
+	failureThreshold             int
 	group                        *FailoverGroup
 	interruptExternalConnections bool
 }
@@ -60,6 +61,7 @@ func NewFailover(ctx context.Context, router adapter.Router, logger log.ContextL
 		interval:                     time.Duration(options.Interval),
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		recoveryThreshold:            options.RecoveryThreshold,
+		failureThreshold:             options.FailureThreshold,
 		interruptExternalConnections: options.InterruptExistConnections,
 	}
 	if len(outbound.tags) == 0 {
@@ -77,7 +79,7 @@ func (s *Failover) Start() error {
 		}
 		outbounds = append(outbounds, detour)
 	}
-	group, err := NewFailoverGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.interval, s.idleTimeout, s.recoveryThreshold, s.interruptExternalConnections)
+	group, err := NewFailoverGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.interval, s.idleTimeout, s.recoveryThreshold, s.failureThreshold, s.interruptExternalConnections)
 	if err != nil {
 		return err
 	}
@@ -199,9 +201,11 @@ type FailoverGroup struct {
 	interval                     time.Duration
 	idleTimeout                  time.Duration
 	recoveryThreshold            int
+	failureThreshold             int
 	history                      adapter.URLTestHistoryStorage
 	checking                     atomic.Bool
 	recoveryCounts               []atomic.Int32
+	failureCounts                []atomic.Int32
 	available                    []atomic.Bool
 	selectedOutboundTCP          adapter.Outbound
 	selectedOutboundUDP          adapter.Outbound
@@ -223,6 +227,7 @@ func NewFailoverGroup(
 	interval time.Duration,
 	idleTimeout time.Duration,
 	recoveryThreshold int,
+	failureThreshold int,
 	interruptExternalConnections bool,
 ) (*FailoverGroup, error) {
 	if interval == 0 {
@@ -237,6 +242,9 @@ func NewFailoverGroup(
 	if recoveryThreshold <= 0 {
 		recoveryThreshold = 3
 	}
+	if failureThreshold <= 0 {
+		failureThreshold = 1
+	}
 	var history adapter.URLTestHistoryStorage
 	if historyFromCtx := service.PtrFromContext[urltest.HistoryStorage](ctx); historyFromCtx != nil {
 		history = historyFromCtx
@@ -246,6 +254,7 @@ func NewFailoverGroup(
 		history = urltest.NewHistoryStorage()
 	}
 	recoveryCounts := make([]atomic.Int32, len(outbounds))
+	failCounts := make([]atomic.Int32, len(outbounds))
 	avail := make([]atomic.Bool, len(outbounds))
 	for i := range avail {
 		avail[i].Store(true)
@@ -259,12 +268,14 @@ func NewFailoverGroup(
 		interval:                     interval,
 		idleTimeout:                  idleTimeout,
 		recoveryThreshold:            recoveryThreshold,
+		failureThreshold:             failureThreshold,
 		history:                      history,
 		close:                        make(chan struct{}),
 		pause:                        service.FromContext[pause.Manager](ctx),
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: interruptExternalConnections,
 		recoveryCounts:               recoveryCounts,
+		failureCounts:                failCounts,
 		available:                    avail,
 	}, nil
 }
@@ -274,6 +285,8 @@ func (g *FailoverGroup) PostStart() {
 	defer g.access.Unlock()
 	g.started = true
 	g.lastActive.Store(time.Now())
+	g.selectedOutboundTCP, _ = g.Select(N.NetworkTCP)
+	g.selectedOutboundUDP, _ = g.Select(N.NetworkUDP)
 	go g.CheckOutbounds(false)
 }
 
@@ -314,25 +327,8 @@ func (g *FailoverGroup) Select(network string) (adapter.Outbound, bool) {
 			return detour, true
 		}
 	}
-	// All unavailable — return first that supports the network
-	for _, detour := range g.outbounds {
-		if !common.Contains(detour.Network(), network) {
-			continue
-		}
-		return detour, false
-	}
+	// All unavailable — keep current selection
 	return nil, false
-}
-
-// markUnavailable marks an outbound as unavailable by its reference.
-func (g *FailoverGroup) markUnavailable(target adapter.Outbound) {
-	for i, detour := range g.outbounds {
-		if detour == target {
-			g.recoveryCounts[i].Store(0)
-			g.available[i].Store(false)
-			return
-		}
-	}
 }
 
 func (g *FailoverGroup) loopCheck() {
@@ -399,9 +395,17 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 			if err != nil {
 				g.history.DeleteURLTestHistory(realTag)
 				g.recoveryCounts[idx].Store(0)
-				if g.available[idx].CompareAndSwap(true, false) {
-					g.logger.Info("outbound ", tag, " health check failed: ", err)
+				if g.available[idx].Load() {
+					count := g.failureCounts[idx].Add(1)
+					if int(count) >= g.failureThreshold {
+						g.failureCounts[idx].Store(0)
+						g.available[idx].Store(false)
+						g.logger.Info("outbound ", tag, " unavailable after ", count, "/", g.failureThreshold, " failures: ", err)
+					} else {
+						g.logger.Info("outbound ", tag, " failure ", count, "/", g.failureThreshold, ": ", err)
+					}
 				} else {
+					g.failureCounts[idx].Store(0)
 					g.logger.Debug("outbound ", tag, " still unavailable: ", err)
 				}
 			} else {
@@ -409,6 +413,7 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 					Time:  time.Now(),
 					Delay: t,
 				})
+				g.failureCounts[idx].Store(0)
 				if !g.available[idx].Load() {
 					count := g.recoveryCounts[idx].Add(1)
 					if int(count) >= g.recoveryThreshold {
@@ -429,22 +434,18 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 		})
 	}
 	b.Wait()
-	g.performUpdateCheck("")
+	g.performUpdateCheck()
 	return result, nil
 }
 
-func (g *FailoverGroup) performUpdateCheck(reason string) {
+func (g *FailoverGroup) performUpdateCheck() {
 	g.access.Lock()
 	defer g.access.Unlock()
 	var updated bool
 	if outbound, _ := g.Select(N.NetworkTCP); outbound != nil && outbound != g.selectedOutboundTCP {
 		if g.selectedOutboundTCP != nil {
 			updated = true
-			if reason != "" {
-				g.logger.Info(g.selectedOutboundTCP.Tag(), " -> ", outbound.Tag(), " (", reason, ")")
-			} else {
-				g.logger.Info(g.selectedOutboundTCP.Tag(), " -> ", outbound.Tag())
-			}
+			g.logger.Info(g.selectedOutboundTCP.Tag(), " -> ", outbound.Tag())
 		}
 		g.selectedOutboundTCP = outbound
 	}
@@ -452,11 +453,7 @@ func (g *FailoverGroup) performUpdateCheck(reason string) {
 		if g.selectedOutboundUDP != nil {
 			updated = true
 			if g.selectedOutboundTCP != outbound {
-				if reason != "" {
-					g.logger.Info(g.selectedOutboundUDP.Tag(), " -> ", outbound.Tag(), " UDP (", reason, ")")
-				} else {
-					g.logger.Info(g.selectedOutboundUDP.Tag(), " -> ", outbound.Tag(), " UDP")
-				}
+				g.logger.Info(g.selectedOutboundUDP.Tag(), " -> ", outbound.Tag(), " UDP")
 			}
 		}
 		g.selectedOutboundUDP = outbound
