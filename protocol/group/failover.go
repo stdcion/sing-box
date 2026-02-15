@@ -387,6 +387,9 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 				}
 			}
 		}
+		if !g.available[maxIndex].Load() {
+			maxIndex = len(g.outbounds) - 1
+		}
 	}
 	for i, detour := range g.outbounds {
 		if i > maxIndex {
