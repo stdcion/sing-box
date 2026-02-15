@@ -24,5 +24,6 @@ type FailoverOutboundOptions struct {
 	IdleTimeout               badoption.Duration `json:"idle_timeout,omitempty"`
 	RecoveryThreshold         int                `json:"recovery_threshold,omitempty"`
 	FailureThreshold          int                `json:"failure_threshold,omitempty"`
+	LazyHealthCheck           *bool              `json:"lazy_health_check,omitempty"`
 	InterruptExistConnections bool               `json:"interrupt_exist_connections,omitempty"`
 }

@@ -44,6 +44,7 @@ type Failover struct {
 	idleTimeout                  time.Duration
 	recoveryThreshold            int
 	failureThreshold             int
+	lazyHealthCheck              bool
 	group                        *FailoverGroup
 	interruptExternalConnections bool
 }
@@ -62,6 +63,7 @@ func NewFailover(ctx context.Context, router adapter.Router, logger log.ContextL
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		recoveryThreshold:            options.RecoveryThreshold,
 		failureThreshold:             options.FailureThreshold,
+		lazyHealthCheck:              options.LazyHealthCheck == nil || *options.LazyHealthCheck,
 		interruptExternalConnections: options.InterruptExistConnections,
 	}
 	if len(outbound.tags) == 0 {
@@ -79,7 +81,7 @@ func (s *Failover) Start() error {
 		}
 		outbounds = append(outbounds, detour)
 	}
-	group, err := NewFailoverGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.interval, s.idleTimeout, s.recoveryThreshold, s.failureThreshold, s.interruptExternalConnections)
+	group, err := NewFailoverGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.interval, s.idleTimeout, s.recoveryThreshold, s.failureThreshold, s.lazyHealthCheck, s.interruptExternalConnections)
 	if err != nil {
 		return err
 	}
@@ -202,6 +204,7 @@ type FailoverGroup struct {
 	idleTimeout                  time.Duration
 	recoveryThreshold            int
 	failureThreshold             int
+	lazyHealthCheck              bool
 	history                      adapter.URLTestHistoryStorage
 	checking                     atomic.Bool
 	recoveryCounts               []atomic.Int32
@@ -228,6 +231,7 @@ func NewFailoverGroup(
 	idleTimeout time.Duration,
 	recoveryThreshold int,
 	failureThreshold int,
+	lazyHealthCheck bool,
 	interruptExternalConnections bool,
 ) (*FailoverGroup, error) {
 	if interval == 0 {
@@ -269,6 +273,7 @@ func NewFailoverGroup(
 		idleTimeout:                  idleTimeout,
 		recoveryThreshold:            recoveryThreshold,
 		failureThreshold:             failureThreshold,
+		lazyHealthCheck:              lazyHealthCheck,
 		history:                      history,
 		close:                        make(chan struct{}),
 		pause:                        service.FromContext[pause.Manager](ctx),
@@ -360,7 +365,7 @@ func (g *FailoverGroup) CheckOutbounds(force bool) {
 }
 
 func (g *FailoverGroup) URLTest(ctx context.Context) (map[string]uint16, error) {
-	return g.urlTest(ctx, false)
+	return g.urlTest(ctx, true)
 }
 
 func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uint16, error) {
@@ -372,7 +377,21 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
 	checked := make(map[string]bool)
 	var resultAccess sync.Mutex
+	maxIndex := len(g.outbounds) - 1
+	if g.lazyHealthCheck && !force {
+		maxIndex = 0
+		for i, detour := range g.outbounds {
+			if detour == g.selectedOutboundTCP || detour == g.selectedOutboundUDP {
+				if i > maxIndex {
+					maxIndex = i
+				}
+			}
+		}
+	}
 	for i, detour := range g.outbounds {
+		if i > maxIndex {
+			break
+		}
 		tag := detour.Tag()
 		realTag := RealTag(detour)
 		if checked[realTag] {
