@@ -397,10 +397,6 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 		if checked[realTag] {
 			continue
 		}
-		history := g.history.LoadURLTestHistory(realTag)
-		if !force && history != nil && time.Since(history.Time) < g.interval {
-			continue
-		}
 		checked[realTag] = true
 		p, loaded := g.outbound.Outbound(realTag)
 		if !loaded {
