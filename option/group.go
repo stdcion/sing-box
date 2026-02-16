@@ -25,5 +25,6 @@ type FailoverOutboundOptions struct {
 	RecoveryThreshold         int                `json:"recovery_threshold,omitempty"`
 	FailureThreshold          int                `json:"failure_threshold,omitempty"`
 	LazyHealthCheck           *bool              `json:"lazy_health_check,omitempty"`
+	LastResort                *bool              `json:"last_resort,omitempty"`
 	InterruptExistConnections bool               `json:"interrupt_exist_connections,omitempty"`
 }
