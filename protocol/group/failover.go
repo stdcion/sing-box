@@ -221,6 +221,7 @@ type FailoverGroup struct {
 	ticker                       *time.Ticker
 	close                        chan struct{}
 	started                      bool
+	initialized                  bool
 	lastActive                   common.TypedValue[time.Time]
 }
 
@@ -392,7 +393,8 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 				}
 			}
 		}
-		if !g.available[maxIndex].Load() {
+		selectedTag := RealTag(g.outbounds[maxIndex])
+		if !g.available[maxIndex].Load() || g.failureCounts[maxIndex].Load() > 0 || g.history.LoadURLTestHistory(selectedTag) == nil {
 			maxIndex = len(g.outbounds) - 1
 		}
 	}
@@ -421,7 +423,11 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 			if err != nil {
 				g.history.DeleteURLTestHistory(realTag)
 				g.recoveryCounts[idx].Store(0)
-				if g.available[idx].Load() {
+				if !g.initialized {
+					g.failureCounts[idx].Store(0)
+					g.available[idx].Store(false)
+					g.logger.Info("outbound ", tag, " unavailable on initial check: ", err)
+				} else if g.available[idx].Load() {
 					count := g.failureCounts[idx].Add(1)
 					if int(count) >= g.failureThreshold {
 						g.failureCounts[idx].Store(0)
@@ -440,7 +446,11 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 					Delay: t,
 				})
 				g.failureCounts[idx].Store(0)
-				if !g.available[idx].Load() {
+				if !g.initialized {
+					g.recoveryCounts[idx].Store(0)
+					g.available[idx].Store(true)
+					g.logger.Info("outbound ", tag, " available on initial check: ", t, "ms")
+				} else if !g.available[idx].Load() {
 					count := g.recoveryCounts[idx].Add(1)
 					if int(count) >= g.recoveryThreshold {
 						g.recoveryCounts[idx].Store(0)
@@ -460,6 +470,7 @@ func (g *FailoverGroup) urlTest(ctx context.Context, force bool) (map[string]uin
 		})
 	}
 	b.Wait()
+	g.initialized = true
 	if g.lastResort {
 		lastIdx := len(g.outbounds) - 1
 		g.available[lastIdx].Store(true)
